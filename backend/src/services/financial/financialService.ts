@@ -43,6 +43,18 @@ import {
   ReconciliationReport,
 } from "../../types/index.js";
 
+/** Minimal surface of TransactionCoordinatorService used to hand off unconfirmed hashes. */
+export interface TransactionTracker {
+  track(input: {
+    txHash: string;
+    kind: string;
+    userId?: string | null;
+    leagueId?: string | null;
+    transactionId?: string | null;
+    metadata?: Record<string, unknown>;
+  }): Promise<unknown>;
+}
+
 /** Max participants per refund invocation, keeps Soroban footprint and fees in bounds. */
 export const REFUND_BATCH_SIZE = 10;
 
@@ -127,6 +139,7 @@ export class FinancialService {
   private readonly deadLetters: PayoutDeadLetterService;
   private readonly email: EmailService;
   private readonly audit: FinancialAuditRecorder;
+  private tracker: TransactionTracker | null = null;
 
   constructor(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -147,6 +160,24 @@ export class FinancialService {
     this.deadLetters =
       (hasDeadLetterMethods ? emailOrDeadLetters : undefined) ??
       (db === prisma ? payoutDeadLetterService : new PayoutDeadLetterService(db, audit));
+  }
+
+  /**
+   * Hands submitted-but-unconfirmed hashes to the transaction coordinator
+   * (wired at bootstrap in server.ts; unset in unit tests).
+   */
+  public setTransactionTracker(tracker: TransactionTracker | null): void {
+    this.tracker = tracker;
+  }
+
+  /** Best-effort: a tracking failure never fails the payment flow itself. */
+  private async trackTransaction(input: Parameters<TransactionTracker["track"]>[0]): Promise<void> {
+    if (!this.tracker) return;
+    try {
+      await this.tracker.track(input);
+    } catch (error) {
+      console.error(`[financial] Failed to track transaction ${input.txHash}:`, (error as Error).message);
+    }
   }
 
   /**
@@ -377,6 +408,16 @@ export class FinancialService {
       amount: member.league.entryFee,
       asset: stellarConfig.usdcAssetCode,
       stellarTxHash,
+      metadata: { memberId: member.id, stellarAddress },
+    });
+
+    // Keep watching the hash in case the wallet never reports back for verification
+    await this.trackTransaction({
+      txHash: stellarTxHash,
+      kind: "DEPOSIT",
+      userId,
+      leagueId: member.leagueId,
+      transactionId: transaction?.id ?? null,
       metadata: { memberId: member.id, stellarAddress },
     });
 
@@ -891,6 +932,17 @@ export class FinancialService {
     }
 
     if (!result.success || !result.txHash) {
+      // A submitted-but-unconfirmed settlement may still land: track it so the
+      // outcome is recorded and an admin is alerted if it is dropped
+      if (result.txHash) {
+        await this.trackTransaction({
+          txHash: result.txHash,
+          kind: "SETTLEMENT",
+          userId: adminUserId,
+          leagueId,
+          metadata: { contractLeagueId: contractLeagueId.toString(), error: result.error ?? null },
+        });
+      }
       throw new FinancialConflictError(
         result.error || "Settlement transaction was not confirmed"
       );
@@ -1350,3 +1402,337 @@ export class FinancialService {
 }
 
 export const financialService = new FinancialService();
+
+export type ReconciliationStatus = "BALANCED" | "DISCREPANCY_DETECTED";
+
+export interface ParticipantReconciliationItem {
+  participantAddress: string;
+  userId?: string;
+  dbAmount: number;
+  contractAmount: number;
+  discrepancy: number;
+}
+
+export interface LeagueReconciliationAuditResult {
+  leagueId: string;
+  leagueName: string;
+  contractLeagueId: string;
+  status: ReconciliationStatus;
+  timestamp: Date;
+  dbDepositsTotal: number;
+  onChainDepositedTotal: number;
+  discrepancy: number;
+  participantCountDb: number;
+  participantCountOnChain: number;
+  participantDiscrepancies: ParticipantReconciliationItem[];
+  tokenBalanceOnChain?: number;
+}
+
+export interface DailyReconciliationReport {
+  timestamp: Date;
+  totalLeaguesAudited: number;
+  balancedCount: number;
+  discrepancyCount: number;
+  results: LeagueReconciliationAuditResult[];
+}
+
+export interface ReconciliationAlert {
+  type: "DISCREPANCY_DETECTED";
+  leagueId: string;
+  leagueName: string;
+  discrepancy: number;
+  dbDepositsTotal: number;
+  onChainDepositedTotal: number;
+  timestamp: Date;
+  details?: string;
+}
+
+/**
+ * Automated Ledger Reconciliation Scheduler comparing Stellar testnet balances with DB.
+ * Audits active league on-chain Soroban contract balances against database records,
+ * logs discrepancies to FinancialAuditLog, and emits alerts when discrepancy > 0.000001 USDC.
+ */
+export class LedgerReconciliationScheduler {
+  private timer: NodeJS.Timeout | null = null;
+  private readonly alertListeners: Array<(alert: ReconciliationAlert) => void> = [];
+
+  constructor(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    private readonly db: any = prisma,
+    private readonly stellar: StellarService = stellarService,
+    private readonly audit: FinancialAuditRecorder = financialAuditLog,
+    private readonly financialServiceInstance: FinancialService = financialService
+  ) {}
+
+  public onAlert(listener: (alert: ReconciliationAlert) => void): () => void {
+    this.alertListeners.push(listener);
+    return () => {
+      const idx = this.alertListeners.indexOf(listener);
+      if (idx !== -1) this.alertListeners.splice(idx, 1);
+    };
+  }
+
+  private emitAlert(alert: ReconciliationAlert): void {
+    for (const listener of this.alertListeners) {
+      try {
+        listener(alert);
+      } catch (err) {
+        console.error("[ReconciliationAlert Error]", err);
+      }
+    }
+    console.warn(
+      `[RECONCILIATION ALERT] Discrepancy detected in league ${alert.leagueId}: diff=${alert.discrepancy} USDC`
+    );
+  }
+
+  public startDaily(intervalMs: number = 24 * 60 * 60 * 1000): void {
+    if (this.timer) return;
+    this.timer = setInterval(() => {
+      this.runDailyReconciliation().catch((err) => {
+        console.error("[LedgerReconciliationScheduler] Daily run failed:", err);
+      });
+    }, intervalMs);
+    this.timer.unref();
+  }
+
+  public stop(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  /**
+   * Reconciles a single league between DB records and Soroban escrow state.
+   */
+  public async reconcileLeague(leagueId: string): Promise<LeagueReconciliationAuditResult> {
+    const league = await this.db.league.findUnique({
+      where: { id: leagueId },
+      include: {
+        members: {
+          include: { user: true },
+        },
+        transactions: true,
+      },
+    });
+
+    if (!league) {
+      throw new Error(`League ${leagueId} not found`);
+    }
+
+    // Query confirmed deposits from db.leagueDeposit or db.transaction
+    let confirmedTxs: any[] = [];
+    if (this.db.leagueDeposit?.findMany) {
+      const deposits = await this.db.leagueDeposit.findMany({
+        where: {
+          leagueId,
+          status: "CONFIRMED",
+        },
+      });
+      confirmedTxs = deposits.map((d: any) => ({
+        amount: typeof d.amount === "number" ? d.amount : Number(d.amount),
+        userId: d.userId,
+        walletAddress: d.walletAddress,
+      }));
+    } else {
+      const txs =
+        league.transactions ||
+        (await this.db.transaction?.findMany?.({
+          where: {
+            leagueId,
+            type: TransactionType.ENTRY_FEE,
+            status: TransactionStatus.CONFIRMED,
+          },
+        })) ||
+        [];
+      confirmedTxs = txs.filter(
+        (tx: any) =>
+          (tx.type === TransactionType.ENTRY_FEE ||
+            tx.type === "ENTRY_FEE" ||
+            tx.type === "DEPOSIT") &&
+          (tx.status === TransactionStatus.CONFIRMED || tx.status === "CONFIRMED")
+      );
+    }
+
+    const dbDepositsTotal = confirmedTxs.reduce(
+      (sum: number, tx: any) =>
+        sum + (typeof tx.amount === "number" ? tx.amount : Number(tx.amount)),
+      0
+    );
+
+    let contractLeagueId: bigint;
+    try {
+      contractLeagueId = FinancialService.toContractLeagueId(league.id);
+    } catch {
+      contractLeagueId = BigInt(Math.abs(Number(league.id) || 1));
+    }
+
+    const contractState = await this.stellar.getContractLeagueState(contractLeagueId);
+    if (!contractState) {
+      throw new Error(`League ${league.id} not found on Soroban contract`);
+    }
+
+    // Stroops to USDC (7 decimals)
+    const onChainDepositedTotal = Number(contractState.total_deposited) / 10_000_000;
+    const participantCountOnChain = contractState.participant_count;
+    const participantCountDb = (league.members || []).filter(
+      (m: any) =>
+        m.paymentStatus === PaymentStatus.PAYMENT_CONFIRMED ||
+        m.status === MembershipStatus.ACTIVE
+    ).length;
+
+    // Check individual participant deposits from contract mapping
+    const participantDiscrepancies: ParticipantReconciliationItem[] = [];
+    for (const member of league.members || []) {
+      const walletAddress = member.walletAddress || member.user?.walletAddress;
+      if (walletAddress) {
+        try {
+          const onChainParticipantStroops = await this.stellar.getContractDeposit(
+            contractLeagueId,
+            walletAddress
+          );
+          const onChainParticipantUsdc = Number(onChainParticipantStroops) / 10_000_000;
+          const memberTxs = confirmedTxs.filter(
+            (tx: any) => tx.userId === member.userId || tx.memberId === member.id
+          );
+          const memberDbDeposit = memberTxs.reduce(
+            (sum: number, tx: any) =>
+              sum + (typeof tx.amount === "number" ? tx.amount : Number(tx.amount)),
+            0
+          );
+          const pDiscrepancy = Math.abs(memberDbDeposit - onChainParticipantUsdc);
+          if (pDiscrepancy > 0.000001) {
+            participantDiscrepancies.push({
+              participantAddress: walletAddress,
+              userId: member.userId,
+              dbAmount: memberDbDeposit,
+              contractAmount: onChainParticipantUsdc,
+              discrepancy: parseFloat(pDiscrepancy.toFixed(6)),
+            });
+          }
+        } catch {
+          // Individual deposit lookup is non-fatal
+        }
+      }
+    }
+
+    let tokenBalanceOnChain: number | undefined;
+    try {
+      if (contractState.token_address) {
+        const balStroops = await this.stellar.getContractTokenBalance(
+          contractState.token_address
+        );
+        tokenBalanceOnChain = Number(balStroops) / 10_000_000;
+      }
+    } catch {
+      // Non-fatal
+    }
+
+    const discrepancy = Math.abs(dbDepositsTotal - onChainDepositedTotal);
+    const hasDiscrepancy = discrepancy > 0.000001 || participantDiscrepancies.length > 0;
+    const status: ReconciliationStatus = hasDiscrepancy ? "DISCREPANCY_DETECTED" : "BALANCED";
+    const timestamp = new Date();
+
+    const result: LeagueReconciliationAuditResult = {
+      leagueId: league.id,
+      leagueName: league.name || "",
+      contractLeagueId: contractLeagueId.toString(),
+      status,
+      timestamp,
+      dbDepositsTotal: parseFloat(dbDepositsTotal.toFixed(6)),
+      onChainDepositedTotal: parseFloat(onChainDepositedTotal.toFixed(6)),
+      discrepancy: parseFloat(discrepancy.toFixed(6)),
+      participantCountDb,
+      participantCountOnChain,
+      participantDiscrepancies,
+      tokenBalanceOnChain,
+    };
+
+    if (hasDiscrepancy) {
+      this.emitAlert({
+        type: "DISCREPANCY_DETECTED",
+        leagueId: league.id,
+        leagueName: league.name || "",
+        discrepancy: result.discrepancy,
+        dbDepositsTotal: result.dbDepositsTotal,
+        onChainDepositedTotal: result.onChainDepositedTotal,
+        timestamp,
+        details:
+          participantDiscrepancies.length > 0
+            ? `Participant discrepancies: ${participantDiscrepancies.length}`
+            : undefined,
+      });
+
+      this.audit.record({
+        action: FinancialAuditAction.RECONCILIATION_DISCREPANCY,
+        leagueId: league.id,
+        amount: result.discrepancy,
+        metadata: {
+          status,
+          timestamp: timestamp.toISOString(),
+          discrepancy: result.discrepancy,
+          dbDepositsTotal: result.dbDepositsTotal,
+          onChainDepositedTotal: result.onChainDepositedTotal,
+          participantDiscrepancies,
+        },
+      });
+    } else {
+      this.audit.record({
+        action: FinancialAuditAction.RECONCILIATION_BALANCED,
+        leagueId: league.id,
+        amount: 0,
+        metadata: {
+          status,
+          timestamp: timestamp.toISOString(),
+          dbDepositsTotal: result.dbDepositsTotal,
+          onChainDepositedTotal: result.onChainDepositedTotal,
+        },
+      });
+    }
+
+    return result;
+  }
+
+  /**
+   * Runs daily reconciliation across all active/upcoming leagues.
+   */
+  public async runDailyReconciliation(): Promise<DailyReconciliationReport> {
+    const leagues = await this.db.league.findMany({
+      where: {
+        status: { in: [LeagueStatus.ACTIVE, LeagueStatus.UPCOMING] },
+      },
+      select: { id: true },
+    });
+
+    const results: LeagueReconciliationAuditResult[] = [];
+    let balancedCount = 0;
+    let discrepancyCount = 0;
+
+    for (const { id } of leagues) {
+      try {
+        const res = await this.reconcileLeague(id);
+        results.push(res);
+        if (res.status === "BALANCED") {
+          balancedCount++;
+        } else {
+          discrepancyCount++;
+        }
+      } catch (err: any) {
+        console.error(
+          `[LedgerReconciliationScheduler] Failed to reconcile league ${id}:`,
+          err?.message || err
+        );
+      }
+    }
+
+    return {
+      timestamp: new Date(),
+      totalLeaguesAudited: results.length,
+      balancedCount,
+      discrepancyCount,
+      results,
+    };
+  }
+}
+
+export const ledgerReconciliationScheduler = new LedgerReconciliationScheduler();

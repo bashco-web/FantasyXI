@@ -18,7 +18,9 @@ export interface CryptoAuditEntry {
 export interface VerificationResult {
   valid: boolean;
   totalEntries: number;
+  verifiedBlocks?: number;
   tamperedIndex?: number;
+  corruptRecordId?: string;
   error?: string;
   lastVerifiedHash?: string;
 }
@@ -128,7 +130,9 @@ export class CryptographicAuditLog {
         return {
           valid: false,
           totalEntries: chain.length,
+          verifiedBlocks: i,
           tamperedIndex: i,
+          corruptRecordId: entry.id,
           error: `Sequence mismatch at index ${i}: expected ${i + 1}, found ${entry.sequence}`,
         };
       }
@@ -138,7 +142,9 @@ export class CryptographicAuditLog {
         return {
           valid: false,
           totalEntries: chain.length,
+          verifiedBlocks: i,
           tamperedIndex: i,
+          corruptRecordId: entry.id,
           error: `Broken hash continuity at index ${i}: stored previousHash does not match prior entry`,
         };
       }
@@ -155,7 +161,9 @@ export class CryptographicAuditLog {
         return {
           valid: false,
           totalEntries: chain.length,
+          verifiedBlocks: i,
           tamperedIndex: i,
+          corruptRecordId: entry.id,
           error: `Tampered row detected at index ${i}: computed hash ${computedHash} != stored hash ${entry.hash}`,
         };
       }
@@ -166,6 +174,7 @@ export class CryptographicAuditLog {
     return {
       valid: true,
       totalEntries: chain.length,
+      verifiedBlocks: chain.length,
       lastVerifiedHash: expectedPrevHash,
     };
   }

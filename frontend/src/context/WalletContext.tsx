@@ -13,8 +13,9 @@ import {
   type ISupportedWallet,
 } from "@creit.tech/stellar-wallets-kit/types";
 import type { WalletAdapter, WalletTransactionSigner } from "@/lib/stellar/sorobanDeposit";
+import { createSupportedWalletModules } from "@/lib/stellar/walletModal";
 
-export type WalletProviderId = "freighter" | "albedo" | "xbull" | "wallet_connect";
+export type WalletProviderId = "freighter" | "albedo" | "xbull" | "hana" | "wallet_connect";
 
 export interface SupportedWallet extends ISupportedWallet {
   id: WalletProviderId;
@@ -39,13 +40,14 @@ const WALLET_IDS = new Set<WalletProviderId>([
   "freighter",
   "albedo",
   "xbull",
+  "hana",
   "wallet_connect",
 ]);
 
 const walletConnectProjectId = process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID;
 
 function createModules() {
-  const modules = defaultModules();
+  const modules = createSupportedWalletModules();
   if (walletConnectProjectId) {
     modules.push(
       new WalletConnectModule({

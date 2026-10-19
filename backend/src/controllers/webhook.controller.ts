@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import crypto from "crypto";
 import { webhookDispatcher, WebhookEndpoint } from "../services/webhooks/webhookDispatcher.js";
+import { webhookRetryEngine } from "../services/webhooks/webhookRetryEngine.js";
 
 // In-memory endpoints registry (backed by DB when available)
 const registeredEndpoints: Map<string, WebhookEndpoint> = new Map();
@@ -36,6 +37,7 @@ export async function createEndpoint(req: Request, res: Response): Promise<void>
     };
 
     registeredEndpoints.set(endpointId, endpoint);
+    webhookRetryEngine.registerEndpoint(endpoint);
 
     res.status(201).json({
       success: true,
@@ -88,12 +90,46 @@ export async function testDispatch(req: Request, res: Response): Promise<void> {
     timestamp: new Date().toISOString(),
   };
 
-  const delivery = await webhookDispatcher.dispatch(endpoint, "ping", samplePayload);
+  const delivery = await webhookRetryEngine.dispatch(endpoint, "ping", samplePayload);
   res.json({ success: true, delivery });
 }
 
 export async function listDeliveries(req: Request, res: Response): Promise<void> {
   const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-  const deliveries = webhookDispatcher.listDeliveries(id);
+  const deliveries = webhookRetryEngine.listDeliveries(id);
   res.json({ success: true, deliveries });
+}
+
+export async function getDeadLetterDeliveries(req: Request, res: Response): Promise<void> {
+  const endpointId = req.query.endpointId as string | undefined;
+  const deadLetters = webhookRetryEngine.getDeadLetterQueue(endpointId);
+  res.json({ success: true, deadLetters });
+}
+
+export async function retryFailedDelivery(req: Request, res: Response): Promise<void> {
+  try {
+    const deliveryId = req.body.deliveryId || req.body.id;
+    if (!deliveryId) {
+      res.status(400).json({ error: "deliveryId is required in request body" });
+      return;
+    }
+
+    const delivery = await webhookRetryEngine.retryDelivery(deliveryId);
+    res.json({ success: true, delivery });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || "Failed to retry delivery" });
+  }
+}
+
+export async function reactivateEndpointController(req: Request, res: Response): Promise<void> {
+  try {
+    const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const endpoint = webhookRetryEngine.reactivateEndpoint(id);
+    if (registeredEndpoints.has(id)) {
+      registeredEndpoints.get(id)!.isActive = true;
+    }
+    res.json({ success: true, endpoint });
+  } catch (error: any) {
+    res.status(404).json({ error: error.message || "Failed to reactivate endpoint" });
+  }
 }

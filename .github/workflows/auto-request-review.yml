@@ -1,0 +1,52 @@
+name: Auto Request Review
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+
+permissions:
+  pull-requests: write
+
+jobs:
+  request-maintainer-review:
+    name: Request Maintainer Review
+    runs-on: ubuntu-latest
+    steps:
+      - name: Request review from maintainer
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const maintainer = 'Stanley471';
+            const prAuthor = context.payload.pull_request.user.login;
+
+            // Do not request review if PR author is the maintainer themself
+            if (prAuthor.toLowerCase() === maintainer.toLowerCase()) {
+              core.info(`PR is authored by ${maintainer}. Skipping review request.`);
+              return;
+            }
+
+            // Check existing requested reviewers to avoid duplicate requests
+            const requestedReviewers = context.payload.pull_request.requested_reviewers || [];
+            const alreadyRequested = requestedReviewers.some(
+              (r) => r.login.toLowerCase() === maintainer.toLowerCase()
+            );
+
+            if (alreadyRequested) {
+              core.info(`Review already requested from ${maintainer}.`);
+              return;
+            }
+
+            try {
+              await github.rest.pulls.requestReviewers({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.payload.pull_request.number,
+                reviewers: [maintainer]
+              });
+              core.info(`Successfully requested review from ${maintainer}.`);
+            } catch (error) {
+              core.warning(`Failed to request review from ${maintainer}: ${error.message}`);
+            }

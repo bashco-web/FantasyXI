@@ -11,9 +11,6 @@ interface BenchProps {
 }
 
 export const Bench: React.FC<BenchProps> = ({ isLoading = false }) => {
-  const benchPlayers = useTeamStore((state) => 
-    state.players.filter((p) => !p.isStarter).sort((a, b) => a.positionOrder - b.positionOrder)
-export const Bench: React.FC = () => {
   // See Pitch.tsx: derive with useMemo, not inside the selector, to avoid an
   // infinite re-render loop from useSyncExternalStore reference-equality checks.
   // Derived with useMemo: a selector returning a new array loops forever in zustand

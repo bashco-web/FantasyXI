@@ -22,7 +22,7 @@ export interface PlayerCardProps {
   onQuickAction?: (action: "captain" | "vice" | "swap" | "transfer") => void;
 }
 
-export const PlayerCard: React.FC<PlayerCardProps> = ({
+const PlayerCardComponent: React.FC<PlayerCardProps> = ({
   player,
   positionSlot,
   isStarter,
@@ -65,10 +65,10 @@ export const PlayerCard: React.FC<PlayerCardProps> = ({
     setDroppableRef(node);
   };
 
-<<<<<<< HEAD
   if (isLoading) {
     return <PlayerCardSkeleton positionSlot={positionSlot} isStarter={isStarter} benchIndex={benchIndex} />;
-=======
+  }
+
   // Drag state evaluation: is this card an eligible or ineligible target?
   const isDragInProgress = !!activeDragPlayer && !isOverlay;
   const isSelfBeingDragged =
@@ -90,7 +90,6 @@ export const PlayerCard: React.FC<PlayerCardProps> = ({
       isSubstitutionEligible = validation.valid;
       invalidReason = validation.reason;
     }
->>>>>>> 720c408 (feat: complete deposit verification, soroban error recovery, e2e payment settlement, and interactive pitch dnd (closes #90, #96, #95, #92))
   }
 
   // Empty slot (when building or drafting)
@@ -174,15 +173,11 @@ export const PlayerCard: React.FC<PlayerCardProps> = ({
   return (
     <div
       ref={setNodeRef}
-<<<<<<< HEAD
-      className={`relative flex flex-col items-center ${isDragging && !isOverlay ? 'opacity-30' : ''}`}
-      data-testid={`player-card-${player.id}`}
-      data-starter={isStarter ? "true" : "false"}
-    >
-=======
       className={`relative flex flex-col items-center transition-all duration-150 ${
         isDragging && !isOverlay ? "opacity-30" : ""
       }`}
+      data-testid={`player-card-${player.id}`}
+      data-starter={isStarter ? "true" : "false"}
     >
       {/* Floating Status Tooltip during Drag */}
       {isDragInProgress && !isSelfBeingDragged && isOver && (
@@ -198,8 +193,6 @@ export const PlayerCard: React.FC<PlayerCardProps> = ({
             : `✕ ${invalidReason || "Invalid Move"}`}
         </div>
       )}
-
->>>>>>> 720c408 (feat: complete deposit verification, soroban error recovery, e2e payment settlement, and interactive pitch dnd (closes #90, #96, #95, #92))
       <button
         type="button"
         onClick={onClick}
@@ -274,3 +267,11 @@ export const PlayerCard: React.FC<PlayerCardProps> = ({
     </div>
   );
 };
+
+/**
+ * PlayerCard wrapped in React.memo so the pitch layout avoids re-rendering
+ * cards whose props are unchanged (e.g. during drag operations or unrelated
+ * store updates).
+ */
+export const PlayerCard = React.memo(PlayerCardComponent);
+PlayerCard.displayName = "PlayerCard";

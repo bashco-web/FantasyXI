@@ -12,9 +12,6 @@ interface PitchProps {
 }
 
 export const Pitch: React.FC<PitchProps> = ({ isLoading = false }) => {
-  const starters = useTeamStore((state) => 
-    state.players.filter((p) => p.isStarter).sort((a, b) => a.positionOrder - b.positionOrder)
-export const Pitch: React.FC = () => {
   // Select the raw players array and derive `starters` with useMemo rather than
   // inside the selector: a selector that returns a freshly filtered/sorted array
   // on every call breaks useSyncExternalStore's reference-equality check and

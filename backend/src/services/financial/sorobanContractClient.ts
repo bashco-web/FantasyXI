@@ -71,6 +71,8 @@ export interface OnChainLeagueState {
   participant_count: number;
   status: number; // 0 = Upcoming, 1 = Active, 2 = Settled, 3 = Cancelled
   total_deposited: bigint;
+  token_address?: string;
+  asset?: string;
 }
 
 export interface WinnerPayoutParam {
@@ -274,7 +276,7 @@ export class SorobanContractClient {
           }
 
           if (rpc.Api.isSimulationRestore(simulation)) {
-            const restored = await this.restoreFootprint(keypair, simulation.restorePreamble);
+            const restored = await this.restoreFootprint(sourceSecret, simulation.restorePreamble);
             if (!restored.success) {
               return this.failure(`Footprint restoration failed: ${restored.error}`, restored.txHash);
             }
@@ -620,6 +622,8 @@ export class SorobanContractClient {
       participant_count: Number(state.participant_count),
       status: Number(state.status),
       total_deposited: BigInt(state.total_deposited as bigint),
+      token_address: state.token_address ? String(state.token_address) : (state.asset ? String(state.asset) : undefined),
+      asset: state.asset ? String(state.asset) : (state.token_address ? String(state.token_address) : undefined),
     };
   }
 

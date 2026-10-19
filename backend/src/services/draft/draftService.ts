@@ -253,3 +253,239 @@ export class DraftService {
 }
 
 export const draftService = new DraftService();
+
+export const SQUAD_POSITION_LIMITS = {
+  GKP: 2,
+  DEF: 5,
+  MID: 5,
+  FWD: 3,
+} as const;
+
+export interface DraftRoomConfig {
+  leagueId: string;
+  participants: string[];
+  rounds?: number;
+  timePerPickSec?: number;
+  availablePlayers: PlayerCandidate[];
+  broadcastCallback?: (event: any) => void;
+  draftService?: DraftService;
+}
+
+export class DraftRoomManager {
+  public leagueId: string;
+  public participants: string[];
+  public rounds: number;
+  public timePerPickSec: number;
+  public availablePlayers: PlayerCandidate[];
+  public draftSequence: Array<{ squadId: string; round: number; pickNumber: number }>;
+  public currentPickIndex: number = 0;
+  public remainingSeconds: number;
+  public status: "NOT_STARTED" | "IN_PROGRESS" | "COMPLETED" = "NOT_STARTED";
+  private squadDraftedPlayers: Map<string, PlayerCandidate[]> = new Map();
+  private timer: NodeJS.Timeout | null = null;
+  private broadcastCallback?: (event: any) => void;
+  private draftService: DraftService;
+
+  constructor(config: DraftRoomConfig) {
+    this.leagueId = config.leagueId;
+    this.participants = [...config.participants];
+    this.rounds = config.rounds ?? 15;
+    this.timePerPickSec = config.timePerPickSec ?? 60;
+    this.availablePlayers = [...config.availablePlayers];
+    this.broadcastCallback = config.broadcastCallback;
+    this.draftService = config.draftService ?? draftService;
+    this.remainingSeconds = this.timePerPickSec;
+
+    for (const p of this.participants) {
+      this.squadDraftedPlayers.set(p, []);
+    }
+
+    this.draftSequence = DraftRoomManager.buildSnakePickOrder(this.participants, this.rounds);
+    this.draftService.createDraftRoom(this.leagueId, this.participants, this.timePerPickSec);
+  }
+
+  public static buildSnakePickOrder(
+    participants: string[],
+    totalRounds: number = 15
+  ): Array<{ squadId: string; round: number; pickNumber: number }> {
+    const sequence: Array<{ squadId: string; round: number; pickNumber: number }> = [];
+    let pickNumber = 1;
+    const n = participants.length;
+    for (let round = 1; round <= totalRounds; round++) {
+      if (round % 2 === 1) {
+        // Odd round: 1 -> N
+        for (let i = 0; i < n; i++) {
+          sequence.push({ squadId: participants[i], round, pickNumber: pickNumber++ });
+        }
+      } else {
+        // Even round: N -> 1
+        for (let i = n - 1; i >= 0; i--) {
+          sequence.push({ squadId: participants[i], round, pickNumber: pickNumber++ });
+        }
+      }
+    }
+    return sequence;
+  }
+
+  public getCurrentTurn(): { squadId: string; round: number; pickNumber: number } | null {
+    if (this.currentPickIndex >= this.draftSequence.length) return null;
+    return this.draftSequence[this.currentPickIndex];
+  }
+
+  public start(): void {
+    if (this.status === "COMPLETED") return;
+    this.status = "IN_PROGRESS";
+    this.remainingSeconds = this.timePerPickSec;
+    this.startTimer();
+    this.emitEvent({
+      type: "DRAFT_STARTED",
+      leagueId: this.leagueId,
+      currentTurn: this.getCurrentTurn(),
+    });
+  }
+
+  public stop(): void {
+    this.stopTimer();
+  }
+
+  public startTimer(): void {
+    this.stopTimer();
+    this.timer = setInterval(() => {
+      this.tick();
+    }, 1000);
+    if (this.timer && typeof this.timer.unref === "function") {
+      this.timer.unref();
+    }
+  }
+
+  public stopTimer(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  public async tick(): Promise<void> {
+    if (this.status !== "IN_PROGRESS") return;
+
+    this.remainingSeconds--;
+    const turn = this.getCurrentTurn();
+    this.emitEvent({
+      type: "DRAFT_TIMER_TICK",
+      leagueId: this.leagueId,
+      squadId: turn?.squadId,
+      remainingSeconds: this.remainingSeconds,
+      round: turn?.round,
+      pickIndex: this.currentPickIndex,
+    });
+
+    if (this.remainingSeconds <= 0) {
+      await this.autoPickCurrentTurn();
+    }
+  }
+
+  public isPlayerEligibleForSquad(squadId: string, player: PlayerCandidate): boolean {
+    const owned = this.squadDraftedPlayers.get(squadId) || [];
+    const pos = player.position;
+    const count = owned.filter((p) => p.position === pos).length;
+    const max = SQUAD_POSITION_LIMITS[pos];
+    return count < max;
+  }
+
+  public getSquadPositionCounts(squadId: string): Record<string, number> {
+    const owned = this.squadDraftedPlayers.get(squadId) || [];
+    return {
+      GKP: owned.filter((p) => p.position === "GKP").length,
+      DEF: owned.filter((p) => p.position === "DEF").length,
+      MID: owned.filter((p) => p.position === "MID").length,
+      FWD: owned.filter((p) => p.position === "FWD").length,
+    };
+  }
+
+  public getSquadPicks(squadId: string): PlayerCandidate[] {
+    return this.squadDraftedPlayers.get(squadId) || [];
+  }
+
+  public async makePick(squadId: string, playerId: number): Promise<LeaguePlayerOwnership> {
+    const currentTurn = this.getCurrentTurn();
+    if (!currentTurn) {
+      throw new Error("Draft already completed");
+    }
+    if (currentTurn.squadId !== squadId) {
+      throw new NotYourTurnError(squadId, currentTurn.squadId);
+    }
+
+    const player = this.availablePlayers.find((p) => p.id === playerId);
+    if (!player) {
+      throw new Error(`Player ${playerId} not found in available player pool`);
+    }
+
+    if (!this.isPlayerEligibleForSquad(squadId, player)) {
+      throw new Error(
+        `Squad ${squadId} cannot draft player ${player.displayName} (${player.position}) - position quota exceeded`
+      );
+    }
+
+    const pick = await this.draftService.executeDraftPick(this.leagueId, squadId, playerId);
+    this.squadDraftedPlayers.get(squadId)?.push(player);
+
+    this.currentPickIndex++;
+    this.remainingSeconds = this.timePerPickSec;
+
+    if (this.currentPickIndex >= this.draftSequence.length) {
+      this.status = "COMPLETED";
+      this.stopTimer();
+      this.emitEvent({
+        type: "DRAFT_COMPLETED",
+        leagueId: this.leagueId,
+        totalPicks: this.draftSequence.length,
+      });
+    } else {
+      this.emitEvent({
+        type: "DRAFT_PICK_CONFIRMED",
+        leagueId: this.leagueId,
+        pick,
+        player,
+        nextTurn: this.getCurrentTurn(),
+      });
+    }
+
+    return pick;
+  }
+
+  public async autoPickCurrentTurn(): Promise<LeaguePlayerOwnership> {
+    const currentTurn = this.getCurrentTurn();
+    if (!currentTurn || this.status === "COMPLETED") {
+      throw new Error("No active turn to auto-pick");
+    }
+
+    const squadId = currentTurn.squadId;
+    const eligible = this.availablePlayers
+      .filter((p) => this.draftService.getPlayerOwner(this.leagueId, p.id) === null)
+      .filter((p) => this.isPlayerEligibleForSquad(squadId, p))
+      .sort((a, b) => b.totalPoints - a.totalPoints || b.price - a.price);
+
+    if (eligible.length === 0) {
+      throw new Error(`No eligible players matching squad position constraints for squad ${squadId}`);
+    }
+
+    const bestPlayer = eligible[0];
+    const pick = await this.makePick(squadId, bestPlayer.id);
+
+    this.emitEvent({
+      type: "AUTO_PICK_EXECUTED",
+      leagueId: this.leagueId,
+      squadId,
+      player: bestPlayer,
+      pick,
+    });
+
+    return pick;
+  }
+
+  private emitEvent(event: Record<string, unknown>): void {
+    if (this.broadcastCallback) {
+      this.broadcastCallback(event);
+    }
+  }
+}

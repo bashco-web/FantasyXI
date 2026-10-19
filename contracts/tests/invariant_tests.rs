@@ -91,7 +91,7 @@ fn randomized_operation_sequences_preserve_escrow_invariants() {
             active_deposits += ENTRY_FEE;
         }
 
-        let should_settle = generator.next() % 5 == 0;
+        let should_settle = generator.next().is_multiple_of(5);
         if should_settle {
             let active: Vec<usize> = deposited[league_index]
                 .iter()

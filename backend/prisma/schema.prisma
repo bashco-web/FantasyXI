@@ -107,6 +107,17 @@ enum FailedPayoutStatus {
   DISCARDED
 }
 
+/// Lifecycle of an on-chain transaction watched by the transaction coordinator.
+/// PENDING: submitted, not yet final (getTransaction returns NOT_FOUND or the RPC is unreachable).
+/// SUCCESS / FAILED: final ledger outcome reported by Soroban RPC.
+/// DROPPED: never reached a ledger before the confirmation timeout; an admin is alerted.
+enum CoordinatedTransactionStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  DROPPED
+}
+
 /// Financial operations recorded in the append-only audit log
 enum FinancialAuditAction {
   DEPOSIT_SUBMITTED
@@ -119,6 +130,8 @@ enum FinancialAuditAction {
   PAYOUT_RETRY_SUCCEEDED
   PAYOUT_RETRY_FAILED
   PAYOUT_DISCARDED
+  RECONCILIATION_BALANCED
+  RECONCILIATION_DISCREPANCY
 }
 
 // ============================================================
@@ -144,13 +157,14 @@ model User {
   // Relations
   wallet             Wallet?
   squads             Squad[]
-  createdLeagues     League[]           @relation("LeagueCreator")
+  createdLeagues     League[]            @relation("LeagueCreator")
   memberships        LeagueMember[]
   transactions       Transaction[]
-  referrer           User?              @relation("UserReferrals", fields: [referrerId], references: [id])
-  referrees          User[]             @relation("UserReferrals")
-  createdInvitations LeagueInvitation[] @relation("InvitationCreator")
-  usedInvitations    LeagueInvitation[] @relation("InvitationUser")
+  referrer           User?               @relation("UserReferrals", fields: [referrerId], references: [id])
+  referrees          User[]              @relation("UserReferrals")
+  createdInvitations LeagueInvitation[]  @relation("InvitationCreator")
+  usedInvitations    LeagueInvitation[]  @relation("InvitationUser")
+  chatMessages       LeagueChatMessage[]
 
   @@map("users")
 }
@@ -250,7 +264,6 @@ model Gameweek {
   leaguesEnding   League[]              @relation("LeagueEndGW")
   chipUsages      SquadChipUsage[]
   leagueFixtures  LeagueFixture[]
-  squadTransfers  SquadTransfer[]
 
   @@map("gameweeks")
 }
@@ -324,7 +337,6 @@ model Squad {
   transfers      SquadTransfer[]
   memberships    LeagueMember[]
   chipUsages     SquadChipUsage[]
-  squadTransfers SquadTransfer[]
 
   @@map("squads")
 }
@@ -371,13 +383,14 @@ model League {
   updatedAt       DateTime     @updatedAt @map("updated_at")
 
   // Relations
-  creator       User               @relation("LeagueCreator", fields: [creatorId], references: [id])
-  startGameweek Gameweek           @relation("LeagueStartGW", fields: [startGameweekId], references: [id])
-  endGameweek   Gameweek           @relation("LeagueEndGW", fields: [endGameweekId], references: [id])
+  creator       User                @relation("LeagueCreator", fields: [creatorId], references: [id])
+  startGameweek Gameweek            @relation("LeagueStartGW", fields: [startGameweekId], references: [id])
+  endGameweek   Gameweek            @relation("LeagueEndGW", fields: [endGameweekId], references: [id])
   members       LeagueMember[]
   transactions  Transaction[]
   fixtures      LeagueFixture[]
   invitations   LeagueInvitation[]
+  chatMessages  LeagueChatMessage[]
   seasons       LeagueSeason[]
 
   @@index([status, isPrivate])
@@ -716,6 +729,22 @@ model LeagueInvitation {
   @@map("league_invitations")
 }
 
+/// A chat message posted by a member in a league's real-time chat.
+/// History is paged newest-first by (leagueId, createdAt).
+model LeagueChatMessage {
+  id        String   @id @default(uuid())
+  leagueId  String   @map("league_id")
+  userId    String   @map("user_id")
+  body      String   @db.VarChar(500)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  league League @relation(fields: [leagueId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([leagueId, createdAt])
+  @@map("league_chat_messages")
+}
+
 /// Dead-letter queue entry for a payout batch that failed on-chain.
 /// Members referenced by an open entry are excluded from automatic dispatch so a
 /// failed payout is isolated until it is retried or discarded.
@@ -766,4 +795,59 @@ model FinancialAuditLog {
   @@index([leagueId, createdAt])
   @@index([action, createdAt])
   @@map("financial_audit_logs")
+}
+
+/// An on-chain transaction whose finality is tracked by TransactionCoordinatorService.
+/// State lives here (not in memory) so polling resumes after a backend restart.
+model CoordinatedTransaction {
+  id            String                       @id @default(uuid())
+  txHash        String                       @unique @map("tx_hash")
+  /// What the transaction does, e.g. DEPOSIT, SETTLEMENT, REFUND
+  kind          String
+  status        CoordinatedTransactionStatus @default(PENDING)
+  userId        String?                      @map("user_id")
+  leagueId      String?                      @map("league_id")
+  /// Ledger row (transactions.id) to confirm or fail once the outcome is known
+  transactionId String?                      @map("transaction_id")
+  attempts      Int                          @default(0)
+  ledgerSeq     Int?                         @map("ledger_seq")
+  lastError     String?                      @map("last_error")
+  metadata      Json?
+  submittedAt   DateTime                     @default(now()) @map("submitted_at")
+  nextPollAt    DateTime                     @default(now()) @map("next_poll_at")
+  lastPolledAt  DateTime?                    @map("last_polled_at")
+  finalizedAt   DateTime?                    @map("finalized_at")
+  createdAt     DateTime                     @default(now()) @map("created_at")
+  updatedAt     DateTime                     @updatedAt @map("updated_at")
+
+  @@index([status, nextPollAt])
+  @@index([leagueId])
+  @@map("coordinated_transactions")
+}
+
+/// Audit trail of retroactive score corrections (official FPL bonus / stat changes).
+/// One row per changed entity: a player's fixture stats, a squad's gameweek score,
+/// or a league member's running total.
+model ScoreAdjustmentLog {
+  id             String   @id @default(uuid())
+  /// Groups every row written by one adjustment run
+  runId          String   @map("run_id")
+  gameweekId     Int      @map("gameweek_id")
+  /// PLAYER_STAT | SQUAD_SCORE | LEAGUE_MEMBER
+  entityType     String   @map("entity_type")
+  entityId       String   @map("entity_id")
+  squadId        String?  @map("squad_id")
+  leagueId       String?  @map("league_id")
+  playerId       Int?     @map("player_id")
+  previousPoints Int      @map("previous_points")
+  delta          Int
+  newPoints      Int      @map("new_points")
+  reason         String
+  details        Json?
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([gameweekId, createdAt])
+  @@index([squadId])
+  @@index([runId])
+  @@map("score_adjustment_logs")
 }

@@ -6,6 +6,7 @@
  */
 
 import { xdr } from "@stellar/stellar-sdk";
+import { eventBus } from "../events/eventBus.js";
 
 export enum EscrowContractErrorCode {
   AlreadyInitialized = 1,
@@ -356,3 +357,228 @@ export async function executeWithRollback<TResult, TRollbackState>(params: {
     throw error;
   }
 }
+
+// ============================================================================
+// Issue #211: Distributed Transaction Replay Daemon
+// ============================================================================
+
+export interface TrackedTransaction {
+  id: string;
+  idempotencyKey: string;
+  txHash: string;
+  sourceAccount: string;
+  status: "PENDING" | "CONFIRMED" | "FAILED" | "DROPPED";
+  submittedAt: Date;
+  lastCheckedAt?: Date;
+  sequenceNumber: string;
+  resubmissionCount: number;
+  payload: {
+    contractId?: string;
+    method?: string;
+    args?: unknown[];
+    intentType?: "SETTLEMENT" | "PAYMENT" | "DEPOSIT" | string;
+    leagueId?: string | number;
+    adminAddress?: string;
+  };
+}
+
+export interface SorobanRpcClient {
+  getTransaction(hash: string): Promise<{
+    status: "SUCCESS" | "NOT_FOUND" | "FAILED" | "PENDING";
+    ledger?: number;
+    resultXdr?: string;
+  }>;
+}
+
+export interface TransactionResubmitter {
+  resimulateAndBroadcast(tx: TrackedTransaction): Promise<{
+    txHash: string;
+    sequenceNumber: string;
+  }>;
+}
+
+export interface ReplayWorkerOptions {
+  pendingTimeoutMs?: number; // default 60,000 (60 seconds)
+  pollIntervalMs?: number;   // default 10,000
+  rpcClient?: SorobanRpcClient;
+  resubmitter?: TransactionResubmitter;
+}
+
+export class TransactionReplayWorker {
+  private transactions = new Map<string, TrackedTransaction>();
+  private idempotencyKeys = new Set<string>();
+  private timer: NodeJS.Timeout | null = null;
+  private isRunning: boolean = false;
+  private readonly pendingTimeoutMs: number;
+  private readonly pollIntervalMs: number;
+  private rpcClient?: SorobanRpcClient;
+  private resubmitter?: TransactionResubmitter;
+
+  constructor(options: ReplayWorkerOptions = {}) {
+    this.pendingTimeoutMs = options.pendingTimeoutMs ?? 60000;
+    this.pollIntervalMs = options.pollIntervalMs ?? 10000;
+    this.rpcClient = options.rpcClient;
+    this.resubmitter = options.resubmitter;
+  }
+
+  public setRpcClient(client: SorobanRpcClient): void {
+    this.rpcClient = client;
+  }
+
+  public setResubmitter(resubmitter: TransactionResubmitter): void {
+    this.resubmitter = resubmitter;
+  }
+
+  /**
+   * Registers a transaction for tracking. Returns false if idempotencyKey has already been used.
+   */
+  public trackTransaction(
+    tx: Omit<TrackedTransaction, "status" | "resubmissionCount"> & {
+      status?: "PENDING";
+      resubmissionCount?: number;
+    }
+  ): boolean {
+    if (this.idempotencyKeys.has(tx.idempotencyKey)) {
+      console.warn(
+        `[TransactionReplayWorker] Duplicate submission rejected for idempotencyKey: ${tx.idempotencyKey}`
+      );
+      return false;
+    }
+
+    const fullTx: TrackedTransaction = {
+      ...tx,
+      status: "PENDING",
+      resubmissionCount: tx.resubmissionCount ?? 0,
+      submittedAt: tx.submittedAt || new Date(),
+    };
+
+    this.idempotencyKeys.add(tx.idempotencyKey);
+    this.transactions.set(tx.id, fullTx);
+    return true;
+  }
+
+  public getTransaction(id: string): TrackedTransaction | undefined {
+    return this.transactions.get(id);
+  }
+
+  public getAllTransactions(): TrackedTransaction[] {
+    return Array.from(this.transactions.values());
+  }
+
+  public hasIdempotencyKey(key: string): boolean {
+    return this.idempotencyKeys.has(key);
+  }
+
+  public getPendingTransactions(now: Date = new Date()): TrackedTransaction[] {
+    return Array.from(this.transactions.values()).filter((tx) => {
+      if (tx.status !== "PENDING") return false;
+      const elapsed = now.getTime() - tx.submittedAt.getTime();
+      return elapsed >= this.pendingTimeoutMs;
+    });
+  }
+
+  /**
+   * Polls all stuck pending transactions, detecting confirmations, drops, and re-broadcasting.
+   */
+  public async pollPendingTransactions(now: Date = new Date()): Promise<{
+    confirmed: string[];
+    replayed: string[];
+    failed: string[];
+  }> {
+    const stuck = this.getPendingTransactions(now);
+    const confirmed: string[] = [];
+    const replayed: string[] = [];
+    const failed: string[] = [];
+
+    if (!this.rpcClient) {
+      console.warn("[TransactionReplayWorker] No RPC client configured, skipping poll.");
+      return { confirmed, replayed, failed };
+    }
+
+    for (const tx of stuck) {
+      tx.lastCheckedAt = now;
+      try {
+        const statusResult = await this.rpcClient.getTransaction(tx.txHash);
+
+        if (statusResult.status === "SUCCESS") {
+          tx.status = "CONFIRMED";
+          confirmed.push(tx.id);
+          // Emit post-settlement domain events
+          eventBus.publish("TRANSACTION_CONFIRMED", {
+            txId: tx.id,
+            idempotencyKey: tx.idempotencyKey,
+            txHash: tx.txHash,
+            intentType: tx.payload.intentType,
+            leagueId: tx.payload.leagueId,
+            confirmedAt: now.toISOString(),
+          });
+          if (tx.payload.intentType === "SETTLEMENT" && tx.payload.leagueId) {
+            eventBus.publish("settlement.confirmed", {
+              leagueId: tx.payload.leagueId,
+              txHash: tx.txHash,
+            });
+          }
+        } else if (statusResult.status === "NOT_FOUND") {
+          // Mempool drop detected! Re-simulate and re-sign with incremented sequence number
+          if (this.resubmitter) {
+            tx.resubmissionCount += 1;
+            const resubmitted = await this.resubmitter.resimulateAndBroadcast(tx);
+            tx.txHash = resubmitted.txHash;
+            tx.sequenceNumber = resubmitted.sequenceNumber;
+            tx.submittedAt = now; // reset timer for newly broadcast transaction
+            replayed.push(tx.id);
+            eventBus.publish("TRANSACTION_REPLAYED", {
+              txId: tx.id,
+              idempotencyKey: tx.idempotencyKey,
+              newTxHash: resubmitted.txHash,
+              resubmissionCount: tx.resubmissionCount,
+              newSequenceNumber: resubmitted.sequenceNumber,
+            });
+          } else {
+            tx.status = "DROPPED";
+            failed.push(tx.id);
+          }
+        } else if (statusResult.status === "FAILED") {
+          tx.status = "FAILED";
+          failed.push(tx.id);
+        }
+      } catch (err) {
+        console.error(
+          `[TransactionReplayWorker] Error polling transaction ${tx.id} (${tx.txHash}):`,
+          err
+        );
+      }
+    }
+
+    return { confirmed, replayed, failed };
+  }
+
+  public start(): void {
+    if (this.isRunning) return;
+    this.isRunning = true;
+    this.timer = setInterval(() => {
+      this.pollPendingTransactions().catch((err) =>
+        console.error("[TransactionReplayWorker] Polling error:", err)
+      );
+    }, this.pollIntervalMs);
+    if (this.timer && typeof this.timer.unref === "function") {
+      this.timer.unref();
+    }
+  }
+
+  public stop(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    this.isRunning = false;
+  }
+
+  public clear(): void {
+    this.transactions.clear();
+    this.idempotencyKeys.clear();
+  }
+}
+
+export const transactionReplayWorker = new TransactionReplayWorker();
+

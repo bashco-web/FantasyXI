@@ -9,15 +9,18 @@ import {
   reconcileLeague,
   getAffiliateDashboard,
 } from "../controllers/financial.controller.js";
-import { requireAuth, requirePermission } from "../middleware/authMiddleware.js";
-import { Permission } from "../types/index.js";
+import { requireAuth, requirePermission, requireRole } from "../middleware/authMiddleware.js";
+import { Permission, UserRole } from "../types/index.js";
 import { financialRateLimiter, mutationRateLimiter } from "../middleware/rateLimiter.js";
+import { idempotency } from "../middleware/idempotency.js";
 
 const router = Router({ mergeParams: true });
 
 // All financial actions require valid JWT authentication and are protected by financial rate limits
 router.use(requireAuth);
 router.use(financialRateLimiter);
+// Mutations honour the Idempotency-Key header (GET requests pass through)
+router.use(idempotency);
 
 router.get("/requirement", getPaymentRequirement);
 router.post("/submit", submitPayment);

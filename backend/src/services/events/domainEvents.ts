@@ -5,6 +5,7 @@
 
 export const GAMEWEEK_UPDATED_EVENT = "gameweek.updated";
 export const USER_SIGNED_UP_EVENT = "user.signed_up";
+export const SECURITY_TAMPER_DETECTED_EVENT = "SECURITY_TAMPER_DETECTED";
 
 /** Published once a gameweek's live FPL data has been synced and is ready to settle. */
 export interface GameweekUpdatedPayload {
@@ -18,3 +19,13 @@ export interface UserSignedUpPayload {
   email: string;
   username: string;
 }
+
+/** Published when audit chain verification detects cryptographic tampering or link breakage. */
+export interface SecurityTamperDetectedPayload {
+  corruptRecordId?: string;
+  tamperedIndex?: number;
+  totalEntries: number;
+  error?: string;
+  detectedAt: string;
+}
+

@@ -13,7 +13,7 @@ import {
 } from "../lib/chart";
 import { TimeSeriesChart, ChartSeries } from "../components/analytics/TimeSeriesChart";
 import { PerformanceDashboard, shortGameweekLabel } from "../components/analytics/PerformanceDashboard";
-import type { GameweekPerformance, PerformanceAnalytics } from "../types";
+import { ChipType, type GameweekPerformance, type PerformanceAnalytics } from "../types";
 
 function count(html: string, pattern: RegExp): number {
   return (html.match(pattern) ?? []).length;
@@ -197,10 +197,10 @@ const analytics: PerformanceAnalytics = {
   },
   history: [
     gameweek(1, 58, { cumulativePoints: 58, benchPoints: 6 }),
-    gameweek(2, 78, { cumulativePoints: 136, benchPoints: 8, chip: "TRIPLE_CAPTAIN" }),
+    gameweek(2, 78, { cumulativePoints: 136, benchPoints: 8, chip: ChipType.TRIPLE_CAPTAIN }),
     gameweek(3, 47, { cumulativePoints: 183, transferCost: 4 }),
   ],
-  chips: [{ chipType: "TRIPLE_CAPTAIN", gameweekId: 2, gameweekName: "Gameweek 2" }],
+  chips: [{ chipType: ChipType.TRIPLE_CAPTAIN, gameweekId: 2, gameweekName: "Gameweek 2" }],
 };
 
 describe("PerformanceDashboard", () => {

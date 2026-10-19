@@ -1,10 +1,7 @@
 import { create } from "zustand";
 import { Player, Position } from "@/types";
-<<<<<<< HEAD
 import { emitToast } from "@/context/ToastContext";
-=======
 import { validateSubstitution } from "@/lib/formation";
->>>>>>> 720c408 (feat: complete deposit verification, soroban error recovery, e2e payment settlement, and interactive pitch dnd (closes #90, #96, #95, #92))
 
 export interface LocalSquadPlayer {
   id?: number | string;
@@ -110,30 +107,15 @@ export const useTeamStore = create<TeamState>((set, get) => ({
     const a = prev[idxA];
     const b = prev[idxB];
 
-<<<<<<< HEAD
-      // GKP can only swap with GKP
-      const aIsGkp = a.player.position === Position.GKP;
-      const bIsGkp = b.player.position === Position.GKP;
-      if (aIsGkp !== bIsGkp) {
-        emitToast.warning("Goalkeepers can only be swapped with other Goalkeepers.");
-        return { players: prev };
-      }
-
-      // Capture both original starter flags before mutating either player —
-      // comparing against a mutated value here previously made the "did this
-      // cross the starter/bench boundary?" check below always false, since
-      // b.isStarter is reassigned to a's original value in the very next lines.
-      const aWasStarter = a.isStarter;
-      const bWasStarter = b.isStarter;
-      const tempOrder = a.positionOrder;
-=======
     // Validate substitution
     const validation = validateSubstitution(a, b, prev);
     if (!validation.valid) {
+      const message = validation.reason || "Invalid substitution move.";
+      emitToast.warning(message);
       set({
         substitutionFeedback: {
           type: "error",
-          message: validation.reason || "Invalid substitution move.",
+          message,
         },
       });
       return false;
@@ -142,18 +124,12 @@ export const useTeamStore = create<TeamState>((set, get) => ({
     const clone = [...prev];
     const newA = { ...a };
     const newB = { ...b };
->>>>>>> 720c408 (feat: complete deposit verification, soroban error recovery, e2e payment settlement, and interactive pitch dnd (closes #90, #96, #95, #92))
 
     const tempStarter = newA.isStarter;
     const tempOrder = newA.positionOrder;
 
-<<<<<<< HEAD
-      b.isStarter = aWasStarter;
-      b.positionOrder = tempOrder;
-=======
     newA.isStarter = newB.isStarter;
     newA.positionOrder = newB.positionOrder;
->>>>>>> 720c408 (feat: complete deposit verification, soroban error recovery, e2e payment settlement, and interactive pitch dnd (closes #90, #96, #95, #92))
 
     newB.isStarter = tempStarter;
     newB.positionOrder = tempOrder;
@@ -176,33 +152,15 @@ export const useTeamStore = create<TeamState>((set, get) => ({
       newA.isViceCaptain = true;
     }
 
-<<<<<<< HEAD
-      // Validate new formation if we swapped a starter with a bench player
-      if (aWasStarter !== bWasStarter) {
-        // Need to import validateFormation and count starters dynamically. 
-        // We will inline the validation logic for Outfields here since we don't have access to validateFormation import easily inside the store without adding the import.
-        const newStarters = clone.filter(p => p.isStarter);
-        const def = newStarters.filter(p => p.player.position === Position.DEF).length;
-        const mid = newStarters.filter(p => p.player.position === Position.MID).length;
-        const fwd = newStarters.filter(p => p.player.position === Position.FWD).length;
-        
-        if (def < 3 || def > 5 || mid < 2 || mid > 5 || fwd < 1 || fwd > 3) {
-          emitToast.warning(
-            `Invalid Formation: This substitution would result in an invalid formation (${def}-${mid}-${fwd}).`
-          );
-          return { players: prev };
-        }
-      }
-=======
     clone[idxA] = newA;
     clone[idxB] = newB;
->>>>>>> 720c408 (feat: complete deposit verification, soroban error recovery, e2e payment settlement, and interactive pitch dnd (closes #90, #96, #95, #92))
 
+    const successMessage = `Successfully substituted ${a.player.displayName || a.player.lastName} with ${b.player.displayName || b.player.lastName}.`;
     set({
       players: clone,
       substitutionFeedback: {
         type: "success",
-        message: `Successfully substituted ${a.player.displayName || a.player.lastName} with ${b.player.displayName || b.player.lastName}.`,
+        message: successMessage,
       },
     });
     return true;

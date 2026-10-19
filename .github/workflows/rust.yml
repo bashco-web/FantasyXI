@@ -4,9 +4,22 @@ on:
   push:
     branches:
       - main
+    paths:
+      - "contracts/**"
+      - ".github/workflows/rust.yml"
   pull_request:
     branches:
       - main
+    paths:
+      - "contracts/**"
+      - ".github/workflows/rust.yml"
+
+concurrency:
+  group: rust-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   rust-ci:
@@ -25,6 +38,7 @@ jobs:
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
 
       - name: Cache Cargo registry
         uses: actions/cache@v4
@@ -40,6 +54,8 @@ jobs:
       - name: Install binaryen (wasm-opt)
         run: sudo apt-get install -y binaryen
 
+      - name: Verify code formatting (cargo fmt)
+        run: cargo fmt --check
       - name: Run cargo build
         run: |
           cargo build --verbose
@@ -54,5 +70,11 @@ jobs:
             --disable-reference-types \
             "$WASM" -o "$WASM"
 
-      - name: Run cargo test
+      - name: Run clippy linter
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run contract unit tests
         run: cargo test --verbose
+
+      - name: Build contract for wasm32 release target
+        run: cargo build --target wasm32-unknown-unknown --release --verbose

@@ -15,6 +15,7 @@
 export enum SecurityAnomalyType {
   FAILED_LOGIN_SPIKE = "FAILED_LOGIN_SPIKE",
   NEW_DEVICE_LOGIN = "NEW_DEVICE_LOGIN",
+  SECURITY_TAMPER_DETECTED = "SECURITY_TAMPER_DETECTED",
 }
 
 export interface SecurityAnomalyInput {

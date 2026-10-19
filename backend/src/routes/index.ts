@@ -14,23 +14,22 @@ import leaderboardRoutes from "./leaderboard.routes.js";
 import financialRoutes from "./financial.routes.js";
 import sep8Routes from "./sep8.routes.js";
 import webhookRoutes from "./webhook.routes.js";
+import { replicaReads } from "../middleware/readConsistency.js";
 
-const router = Router();
+/**
+ * Main API v1 router.
+ *
+ * Laravel equivalent: routes/api.php route groups with prefix 'v1'.
+ */
+const apiV1Router = Router();
 
-router.use("/sync", syncRoutes);
-router.use("/players", playerRoutes);
-router.use("/teams", teamRoutes);
-router.use("/gameweeks", gameweekRoutes);
-router.use("/fixtures", fixtureRoutes);
-router.use("/squads", squadRoutes);
-router.use("/leagues", leagueRoutes);
-router.use("/auth", authRoutes);
-router.use("/live", liveRoutes);
-router.use("/admin", adminRoutes);
-router.use("/leaderboard", leaderboardRoutes);
-router.use("/financial", financialRoutes);
-router.use("/sep8", sep8Routes);
-router.use("/webhooks", webhookRoutes);
+apiV1Router.use("/auth", authRoutes);
+apiV1Router.use("/sync", syncRoutes);
+apiV1Router.use("/admin/sync", syncRoutes);
+apiV1Router.use("/admin", adminRoutes);
+apiV1Router.use("/sep8", sep8Routes);
+apiV1Router.use("/financial", financialRoutes);
+apiV1Router.use("/webhooks", webhookRoutes);
 
 // Read-heavy public data: GET requests may be served by the nearest read replica.
 // All other routers (auth, squads, admin, sync) always use the primary database.
@@ -46,4 +45,3 @@ apiV1Router.use("/analytics", replicaReads, analyticsRoutes);
 apiV1Router.use("/leaderboard", replicaReads, leaderboardRoutes);
 
 export default apiV1Router;
-export default router;

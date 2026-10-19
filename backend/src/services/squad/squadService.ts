@@ -161,7 +161,7 @@ export class SquadService {
       },
     });
 
-    const playersForValidation: PlayerForValidation[] = dbPlayers.map((p: any) => ({
+    const playersForValidation: PlayerForValidation[] = dbPlayers.map((p) => ({
       id: p.id,
       teamId: p.teamId,
       position: p.position,
@@ -178,7 +178,7 @@ export class SquadService {
     const budgetRemaining = Math.round((100.0 - validated.totalCost) * 10) / 10;
 
     // Persist in transaction
-    const squad = await prisma.$transaction(async (tx: any) => {
+    const squad = await prisma.$transaction(async (tx) => {
       const created = await tx.squad.create({
         data: {
           userId: input.userId,
@@ -187,7 +187,7 @@ export class SquadService {
         },
       });
 
-      const playerMap = new Map(dbPlayers.map((p: any) => [p.id, p]));
+      const playerMap = new Map(dbPlayers.map((p) => [p.id, p]));
 
       await tx.squadPlayer.createMany({
         data: input.players.map((sel) => {
@@ -199,7 +199,7 @@ export class SquadService {
             isCaptain: sel.isCaptain,
             isViceCaptain: sel.isViceCaptain,
             positionOrder: sel.positionOrder,
-            purchasePrice: (p as any).price,
+            purchasePrice: p.price,
           };
         }),
       });
@@ -370,14 +370,6 @@ export class SquadService {
           throw new SquadValidationError("Transfers are closed: no upcoming gameweek");
         }
 
-        // Check if Wildcard is active for this gameweek
-        const wildcardUsage = await tx.squadChipUsage.findUnique({
-          where: {
-            squadId_gameweekId: { squadId, gameweekId: targetGameweek.id },
-          },
-        });
-        const isWildcardActive = wildcardUsage?.chipType === ChipType.WILDCARD;
-
         let available = squad.freeTransfers;
         if (
           squad.freeTransfersGameweekId !== null &&
@@ -391,16 +383,8 @@ export class SquadService {
         }
 
         transferGameweek = targetGameweek;
-        
-        // If Wildcard is active, all transfers are free (0 points cost)
-        if (isWildcardActive) {
-          transferCosts = Array.from({ length: transfers.length }, () => 0);
-          // Don't deduct from free transfers when Wildcard is active
-          freeTransfersLeft = available;
-        } else {
-          transferCosts = SquadService.calculateTransferCosts(transfers.length, available);
-          freeTransfersLeft = Math.max(0, available - transfers.length);
-        }
+        transferCosts = SquadService.calculateTransferCosts(transfers.length, available);
+        freeTransfersLeft = Math.max(0, available - transfers.length);
       }
 
       // 2. Update squad metadata, bank and free transfer balance
@@ -658,7 +642,6 @@ export class SquadService {
           include: { gameweek: true },
           orderBy: { gameweekId: "desc" },
         },
-        chipUsages: true,
       },
     });
 
@@ -684,7 +667,6 @@ export class SquadService {
           },
           orderBy: { positionOrder: "asc" },
         },
-        chipUsages: true,
       },
     });
   }

@@ -215,3 +215,71 @@ self.addEventListener("fetch", (event) => {
     );
   }
 });
+
+// ---------------------------------------------------------------------------
+// Push Notifications (Issue #151)
+// ---------------------------------------------------------------------------
+
+/**
+ * Push event: parse the server payload and display a browser notification.
+ * Expected payload shape: { title, body, url, icon?, badge? }
+ */
+self.addEventListener("push", (event) => {
+  const data = event.data?.json() ?? {};
+  const title = data.title || "FantasyXI Alert";
+  const options = {
+    body: data.body || "",
+    icon: data.icon || "/icons/icon-192.png",
+    badge: data.badge || "/icons/icon-72.png",
+    data: { url: data.url || "/" },
+  };
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+/**
+ * Notification click: close the notification and navigate the user to the
+ * URL embedded in the notification's data payload.
+ */
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const targetUrl = event.notification.data?.url || "/";
+  event.waitUntil(
+    clients
+      .matchAll({ type: "window", includeUncontrolled: true })
+      .then((windowClients) => {
+        // If a tab with this URL is already open, focus it instead of opening a new one
+        for (const client of windowClients) {
+          if (client.url === targetUrl && "focus" in client) {
+            return client.focus();
+          }
+        }
+        return clients.openWindow(targetUrl);
+      })
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Background Sync for Offline Squad Mutations (Issue #214)
+// ---------------------------------------------------------------------------
+
+self.addEventListener("sync", (event) => {
+  if (event.tag === "sync-squad-mutations") {
+    event.waitUntil(
+      (async () => {
+        // Broadcast background sync trigger to all active window clients
+        const windowClients = await clients.matchAll({
+          type: "window",
+          includeUncontrolled: true,
+        });
+        for (const client of windowClients) {
+          client.postMessage({
+            type: "SYNC_SQUAD_MUTATIONS",
+            tag: event.tag,
+            timestamp: Date.now(),
+          });
+        }
+      })()
+    );
+  }
+});
+

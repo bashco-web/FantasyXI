@@ -463,7 +463,7 @@ export class DepositVerificationService {
     });
 
     if (amountMatchOps.length === 0) {
-      const actualAmount = assetMatchOps[0]?.amount;
+      const actualAmount = (assetMatchOps[0] as any)?.amount;
       return {
         verified: false,
         txHash: cleanHash,
@@ -474,7 +474,7 @@ export class DepositVerificationService {
     }
 
     // Check sender match if specified
-    const matchingOp = amountMatchOps.find((op: any) => {
+    const matchingOp: any = amountMatchOps.find((op: any) => {
       if (!expectedSender) return true;
       return op.from === expectedSender || tx.source_account === expectedSender;
     });
@@ -485,7 +485,7 @@ export class DepositVerificationService {
         txHash: cleanHash,
         ledgerSeq: tx.ledger_attr,
         errorCode: DepositVerificationErrorCode.SENDER_MISMATCH,
-        error: `Sender mismatch: expected '${expectedSender}', actual sender was '${amountMatchOps[0].from}'.`,
+        error: `Sender mismatch: expected '${expectedSender}', actual sender was '${(amountMatchOps[0] as any).from}'.`,
       };
     }
 

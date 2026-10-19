@@ -250,7 +250,7 @@ export function normalizePlayerStats(raw: {
     bonus: number;
     total_points: number;
   };
-  explain: Array<{
+  explain?: Array<{
     fixture: number;
     stats: Array<{
       identifier: string;
@@ -258,7 +258,23 @@ export function normalizePlayerStats(raw: {
       value: number;
     }>;
   }>;
-}): NormalizedPlayerStats[] {
+}): any {
+  if (!raw.explain || raw.explain.length === 0) {
+    const s = raw.stats;
+    return {
+      playerFplId: raw.id,
+      minutes: s.minutes ?? 0,
+      goals: s.goals_scored ?? 0,
+      assists: s.assists ?? 0,
+      cleanSheet: (s.clean_sheets ?? 0) > 0,
+      yellowCards: s.yellow_cards ?? 0,
+      redCards: s.red_cards ?? 0,
+      saves: s.saves ?? 0,
+      bonus: s.bonus ?? 0,
+      totalPoints: s.total_points ?? 0,
+    };
+  }
+
   return raw.explain.map((exp) => {
     let minutes = 0;
     let goals = 0;

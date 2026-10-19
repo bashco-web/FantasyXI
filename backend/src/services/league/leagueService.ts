@@ -270,7 +270,7 @@ export class LeagueService {
     let relegations = 0;
 
     for (const tier of tierGroup.tiers) {
-      const entries = leagueSeasons.filter((entry) => entry.tierId === tier.id);
+      const entries = leagueSeasons.filter((entry: any) => entry.tierId === tier.id);
       if (entries.length === 0) {
         continue;
       }

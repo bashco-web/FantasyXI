@@ -294,10 +294,34 @@ export interface LeagueStandingsEntry {
 }
 
 // ============================================================
-// Historical Performance Analytics (GET /api/v1/analytics/me/performance)
+// League Chat (REST history + WebSocket /api/v1/leagues/:id/chat/ws)
 // ============================================================
 
-export type ChipType = "TRIPLE_CAPTAIN" | "BENCH_BOOST" | "FREE_HIT" | "WILDCARD";
+export interface ChatMessage {
+  id: string;
+  leagueId: string;
+  userId: string;
+  username: string;
+  body: string;
+  createdAt: string;
+}
+
+/** A message in the UI, including the sender's own messages that are still in flight */
+export interface ChatEntry extends ChatMessage {
+  /** Correlates an optimistic message with the server's acknowledgement */
+  clientId?: string;
+  status?: "sending" | "failed";
+  error?: string;
+  /** Transport used for the latest send attempt */
+  via?: "socket" | "http";
+  /** The socket dropped before an ack arrived, so the server may still have saved it */
+  lostInFlight?: boolean;
+}
+
+export type ChatConnectionState = "connecting" | "open" | "reconnecting" | "unavailable";
+
+// Historical Performance Analytics (GET /api/v1/analytics/me/performance)
+// ============================================================
 
 export interface GameweekPerformance {
   gameweekId: number;
@@ -346,6 +370,9 @@ export interface PerformanceAnalytics {
   summary: PerformanceSummary;
   history: GameweekPerformance[];
   chips: Array<{ chipType: ChipType; gameweekId: number; gameweekName: string }>;
+}
+
+// ============================================================
 // Global Leaderboard (GET /api/v1/leaderboard)
 // ============================================================
 
@@ -597,5 +624,36 @@ export interface ToastItem {
   duration: number;
   action?: ToastAction;
   createdAt: number;
+}
+
+// ============================================================
+// Payout Dead-Letter Types
+// ============================================================
+
+export enum FailedPayoutStatus {
+  PENDING = "PENDING",
+  RETRYING = "RETRYING",
+  RESOLVED = "RESOLVED",
+  DISCARDED = "DISCARDED",
+}
+
+export interface FailedPayoutRecord {
+  id: string;
+  type: TransactionType | string;
+  leagueId: string;
+  memberIds: string[];
+  recipients: string[];
+  amountPerRecipient: string | number;
+  error: string;
+  errorCode: number | null;
+  recoverable: boolean;
+  attempts: number;
+  status: FailedPayoutStatus;
+  retryNote?: string | null;
+  discardReason?: string | null;
+  claimedBy?: string | null;
+  claimedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
